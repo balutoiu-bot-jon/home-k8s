@@ -1,4 +1,4 @@
-name: "Argo CD App Diff"
+name: "Argo CD Deterministic Validation"
 
 on:
   pull_request:
@@ -8,56 +8,49 @@ on:
       - argo-cd/apps/**
       - argo-cd/extras/**
       - argo-cd/helm_values/**
+      - .github/workflows/argocd-app-diff.yaml
+      - .github/workflows/argocd-app-live-diff.yaml
+      - scripts/argo-cd/**
 
 permissions:
   contents: read
-  issues: write
-  pull-requests: write
 
 jobs:
-  argocd-app-diff:
-    runs-on: home-ubuntu-k8s
-
+  deterministic-validation:
+    runs-on: ubuntu-24.04
     steps:
-      - name: Checkout
+      - name: Checkout candidate
         uses: actions/checkout@v7
 
-      - name: Install Prerequisites
+      - name: Install deterministic validation tools
         shell: bash
         env:
-          # renovate: datasource=github-releases depName=argocd-cli packageName=argoproj/argo-cd
-          ARGOCD_VERSION: v3.4.5
-          # renovate: datasource=github-releases depName=gh packageName=cli/cli
-          GH_VERSION: v2.97.0
+          # renovate: datasource=github-releases depName=helm packageName=helm/helm
+          HELM_VERSION: v4.2.3
+          # renovate: datasource=github-releases depName=kubeconform packageName=yannh/kubeconform
+          KUBECONFORM_VERSION: v0.8.0
           # renovate: datasource=github-releases depName=yq packageName=mikefarah/yq
           YQ_VERSION: v4.53.3
         run: |
-          set -eo pipefail
+          set -euo pipefail
+          curl -sSL -o /tmp/helm.tar.gz "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          tar -xzf /tmp/helm.tar.gz -C /tmp
+          sudo install -m 555 /tmp/linux-amd64/helm /usr/local/bin/helm
 
-          curl -sSL -o /tmp/argocd-linux-amd64 https://github.com/argoproj/argo-cd/releases/download/${ARGOCD_VERSION}/argocd-linux-amd64
-          sudo install -m 555 /tmp/argocd-linux-amd64 /usr/local/bin/argocd
-          rm /tmp/argocd-linux-amd64
+          curl -sSL -o /tmp/kubeconform.tar.gz "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          tar -xzf /tmp/kubeconform.tar.gz -C /tmp kubeconform
+          sudo install -m 555 /tmp/kubeconform /usr/local/bin/kubeconform
 
-          curl -sSL -o /tmp/gh_linux_amd64.tar.gz https://github.com/cli/cli/releases/download/${GH_VERSION}/gh_${GH_VERSION#v}_linux_amd64.tar.gz
-          tar -xzf /tmp/gh_linux_amd64.tar.gz -C /tmp
-          sudo install -m 555 /tmp/gh_${GH_VERSION#v}_linux_amd64/bin/gh /usr/local/bin/gh
-
-          curl -sSL -o /tmp/yq_linux_amd64.tar.gz https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64.tar.gz
-          tar -xzf /tmp/yq_linux_amd64.tar.gz -C /tmp
+          curl -sSL -o /tmp/yq.tar.gz "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64.tar.gz"
+          tar -xzf /tmp/yq.tar.gz -C /tmp
           sudo install -m 555 /tmp/yq_linux_amd64 /usr/local/bin/yq
 
-      - name: Login to Argo CD
+      - name: Validate scripts, RBAC, and rendered manifests
         shell: bash
         run: |
-          set -eo pipefail
-          argocd login --grpc-web --name k3s-ceplea argo.internal.balutoiu.com --username admin --password ${{ secrets.K3S_CEPLEA_ARGOCD_ADMIN_PASSWORD }}
-          argocd login --grpc-web --name k3s-buc argo.internal.buc.balutoiu.com --username admin --password ${{ secrets.K3S_BUC_ARGOCD_ADMIN_PASSWORD }}
-
-      - name: Diff Argo CD app
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -eo pipefail
-          PR_NUMBER=$(jq --raw-output .pull_request.number "$GITHUB_EVENT_PATH")
-          ./scripts/argo-cd/post-gh-pr-diff-comment.sh $PR_NUMBER
+          set -euo pipefail
+          bash -n scripts/argo-cd/show-app-diff.sh scripts/argo-cd/post-gh-pr-diff-comment.sh scripts/argo-cd/tests/*.sh
+          scripts/argo-cd/tests/home-backup-rbac-test.sh
+          scripts/argo-cd/tests/home-backup-manifest-test.sh
+          scripts/argo-cd/tests/show-app-diff-test.sh
+          scripts/argo-cd/tests/post-gh-pr-diff-comment-test.sh

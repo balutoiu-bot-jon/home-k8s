@@ -1,0 +1,85 @@
+name: "Argo CD Live Diff"
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - synchronize
+      - reopened
+    branches:
+      - main
+    paths:
+      - argo-cd/apps/**
+      - argo-cd/extras/**
+      - argo-cd/helm_values/**
+
+permissions:
+  contents: read
+
+jobs:
+  live-argocd-diff:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    runs-on: home-ubuntu-k8s
+    steps:
+      - name: Checkout base-controlled diff implementation
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          persist-credentials: false
+
+      - name: Checkout same-repository candidate as data only
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Install live diff tools
+        shell: bash
+        env:
+          # renovate: datasource=github-releases depName=argocd-cli packageName=argoproj/argo-cd
+          ARGOCD_VERSION: v3.4.5
+          # renovate: datasource=github-releases depName=gh packageName=cli/cli
+          GH_VERSION: v2.97.0
+          # renovate: datasource=github-releases depName=yq packageName=mikefarah/yq
+          YQ_VERSION: v4.53.3
+        run: |
+          set -euo pipefail
+          curl -sSL -o /tmp/argocd-linux-amd64 "https://github.com/argoproj/argo-cd/releases/download/${ARGOCD_VERSION}/argocd-linux-amd64"
+          sudo install -m 555 /tmp/argocd-linux-amd64 /usr/local/bin/argocd
+
+          curl -sSL -o /tmp/gh.tar.gz "https://github.com/cli/cli/releases/download/${GH_VERSION}/gh_${GH_VERSION#v}_linux_amd64.tar.gz"
+          tar -xzf /tmp/gh.tar.gz -C /tmp
+          sudo install -m 555 "/tmp/gh_${GH_VERSION#v}_linux_amd64/bin/gh" /usr/local/bin/gh
+
+          curl -sSL -o /tmp/yq.tar.gz "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64.tar.gz"
+          tar -xzf /tmp/yq.tar.gz -C /tmp
+          sudo install -m 555 /tmp/yq_linux_amd64 /usr/local/bin/yq
+
+      - name: Login to Argo CD
+        shell: bash
+        run: |
+          set -euo pipefail
+          argocd login --grpc-web --name k3s-ceplea argo.internal.balutoiu.com --username admin --password "${{ secrets.K3S_CEPLEA_ARGOCD_ADMIN_PASSWORD }}"
+          argocd login --grpc-web --name k3s-buc argo.internal.buc.balutoiu.com --username admin --password "${{ secrets.K3S_BUC_ARGOCD_ADMIN_PASSWORD }}"
+
+      - name: Diff candidate data with base-controlled scripts
+        shell: bash
+        working-directory: candidate
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HOME_K8S_REVISION: ${{ github.event.pull_request.head.sha }}
+          SHOW_APP_DIFF_BIN: ${{ github.workspace }}/trusted/scripts/argo-cd/show-app-diff.sh
+        run: |
+          set -euo pipefail
+          PR_NUMBER="$(jq --raw-output .pull_request.number "$GITHUB_EVENT_PATH")"
+          "$GITHUB_WORKSPACE/trusted/scripts/argo-cd/post-gh-pr-diff-comment.sh" "$PR_NUMBER"
